@@ -72,6 +72,8 @@ export default function AdminTraders() {
   const onToggle = async (trader_id: string, enabled: boolean) => {
     try {
       await api.setTradingEnabled(trader_id, enabled);
+      // 切换成功后立即热重载，使运行中的Trader开关与DB一致
+      await api.adminReload();
       await mutate();
     } catch (e) {
       alert('切换失败');

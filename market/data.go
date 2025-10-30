@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Data 市场数据结构
@@ -70,14 +71,28 @@ func Get(symbol string) (*Data, error) {
 
 	// 获取3分钟K线数据 (最近10个)
 	klines3m, err := getKlines(symbol, "3m", 40) // 多获取一些用于计算
-	if err != nil {
-		return nil, fmt.Errorf("获取3分钟K线失败: %v", err)
-	}
-
 	// 获取4小时K线数据 (最近10个)
-	klines4h, err := getKlines(symbol, "4h", 60) // 多获取用于计算指标
-	if err != nil {
-		return nil, fmt.Errorf("获取4小时K线失败: %v", err)
+	klines4h, err4h := getKlines(symbol, "4h", 60) // 多获取用于计算指标
+
+	// 轻量回退：若任一K线失败，至少返回Mark Price和24h涨跌，其他指标置0
+	if err != nil || err4h != nil || len(klines3m) == 0 || len(klines4h) == 0 {
+		price, _ := getMarkPrice(symbol)
+		change24h, _ := get24hChange(symbol)
+		oiData, _ := getOpenInterestData(symbol)
+		fundingRate, _ := getFundingRate(symbol)
+		return &Data{
+			Symbol:            symbol,
+			CurrentPrice:      price,
+			PriceChange1h:     0,
+			PriceChange4h:     change24h,
+			CurrentEMA20:      0,
+			CurrentMACD:       0,
+			CurrentRSI7:       0,
+			OpenInterest:      oiData,
+			FundingRate:       fundingRate,
+			IntradaySeries:    nil,
+			LongerTermContext: nil,
+		}, nil
 	}
 
 	// 计算当前指标 (基于3分钟最新数据)
@@ -138,47 +153,61 @@ func Get(symbol string) (*Data, error) {
 
 // getKlines 从Binance获取K线数据
 func getKlines(symbol, interval string, limit int) ([]Kline, error) {
-	url := fmt.Sprintf("https://fapi.binance.com/fapi/v1/klines?symbol=%s&interval=%s&limit=%d",
-		symbol, interval, limit)
-
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	var rawData [][]interface{}
-	if err := json.Unmarshal(body, &rawData); err != nil {
-		return nil, err
-	}
-
-	klines := make([]Kline, len(rawData))
-	for i, item := range rawData {
-		openTime := int64(item[0].(float64))
-		open, _ := parseFloat(item[1])
-		high, _ := parseFloat(item[2])
-		low, _ := parseFloat(item[3])
-		close, _ := parseFloat(item[4])
-		volume, _ := parseFloat(item[5])
-		closeTime := int64(item[6].(float64))
-
-		klines[i] = Kline{
-			OpenTime:  openTime,
-			Open:      open,
-			High:      high,
-			Low:       low,
-			Close:     close,
-			Volume:    volume,
-			CloseTime: closeTime,
+    urlA := fmt.Sprintf("https://fapi.binance.com/fapi/v1/klines?symbol=%s&interval=%s&limit=%d", symbol, interval, limit)
+    urlB := fmt.Sprintf("https://testnet.binancefuture.com/fapi/v1/klines?symbol=%s&interval=%s&limit=%d", symbol, interval, limit)
+	// 超时+重试
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+        client := &http.Client{Timeout: 3 * time.Second}
+        // 主站失败时试试测试网域名
+        target := urlA
+        if attempt > 0 {
+            target = urlB
+        }
+        resp, err := client.Get(target)
+		if err != nil {
+			lastErr = err
+			time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
+			continue
 		}
-	}
+		defer resp.Body.Close()
 
-	return klines, nil
+		body, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		var rawData [][]interface{}
+		if err := json.Unmarshal(body, &rawData); err != nil {
+			lastErr = err
+			continue
+		}
+
+		klines := make([]Kline, len(rawData))
+		for i, item := range rawData {
+			openTime := int64(item[0].(float64))
+			open, _ := parseFloat(item[1])
+			high, _ := parseFloat(item[2])
+			low, _ := parseFloat(item[3])
+			close, _ := parseFloat(item[4])
+			volume, _ := parseFloat(item[5])
+			closeTime := int64(item[6].(float64))
+
+			klines[i] = Kline{
+				OpenTime:  openTime,
+				Open:      open,
+				High:      high,
+				Low:       low,
+				Close:     close,
+				Volume:    volume,
+				CloseTime: closeTime,
+			}
+		}
+
+		return klines, nil
+	}
+	return nil, lastErr
 }
 
 // calculateEMA 计算EMA
@@ -388,11 +417,16 @@ func calculateLongerTermData(klines []Kline) *LongerTermData {
 
 // getOpenInterestData 获取OI数据
 func getOpenInterestData(symbol string) (*OIData, error) {
-	url := fmt.Sprintf("https://fapi.binance.com/fapi/v1/openInterest?symbol=%s", symbol)
-
-	resp, err := http.Get(url)
+    urlA := fmt.Sprintf("https://fapi.binance.com/fapi/v1/openInterest?symbol=%s", symbol)
+    urlB := fmt.Sprintf("https://testnet.binancefuture.com/fapi/v1/openInterest?symbol=%s", symbol)
+	client := &http.Client{Timeout: 3 * time.Second}
+    resp, err := client.Get(urlA)
 	if err != nil {
-		return nil, err
+        // fallback 到测试网域名
+        resp, err = client.Get(urlB)
+        if err != nil {
+            return nil, err
+        }
 	}
 	defer resp.Body.Close()
 
@@ -421,11 +455,15 @@ func getOpenInterestData(symbol string) (*OIData, error) {
 
 // getFundingRate 获取资金费率
 func getFundingRate(symbol string) (float64, error) {
-	url := fmt.Sprintf("https://fapi.binance.com/fapi/v1/premiumIndex?symbol=%s", symbol)
-
-	resp, err := http.Get(url)
+    urlA := fmt.Sprintf("https://fapi.binance.com/fapi/v1/premiumIndex?symbol=%s", symbol)
+    urlB := fmt.Sprintf("https://testnet.binancefuture.com/fapi/v1/premiumIndex?symbol=%s", symbol)
+	client := &http.Client{Timeout: 3 * time.Second}
+    resp, err := client.Get(urlA)
 	if err != nil {
-		return 0, err
+        resp, err = client.Get(urlB)
+        if err != nil {
+            return 0, err
+        }
 	}
 	defer resp.Body.Close()
 
@@ -450,6 +488,60 @@ func getFundingRate(symbol string) (float64, error) {
 
 	rate, _ := strconv.ParseFloat(result.LastFundingRate, 64)
 	return rate, nil
+}
+
+// 轻量端点：获取Mark Price
+func getMarkPrice(symbol string) (float64, error) {
+    urlA := fmt.Sprintf("https://fapi.binance.com/fapi/v1/premiumIndex?symbol=%s", symbol)
+    urlB := fmt.Sprintf("https://testnet.binancefuture.com/fapi/v1/premiumIndex?symbol=%s", symbol)
+	client := &http.Client{Timeout: 3 * time.Second}
+    resp, err := client.Get(urlA)
+	if err != nil {
+        resp, err = client.Get(urlB)
+        if err != nil {
+            return 0, err
+        }
+	}
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return 0, err
+	}
+	var result struct {
+		MarkPrice string `json:"markPrice"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return 0, err
+	}
+	v, _ := strconv.ParseFloat(result.MarkPrice, 64)
+	return v, nil
+}
+
+// 轻量端点：获取24小时价格变化百分比
+func get24hChange(symbol string) (float64, error) {
+    urlA := fmt.Sprintf("https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=%s", symbol)
+    urlB := fmt.Sprintf("https://testnet.binancefuture.com/fapi/v1/ticker/24hr?symbol=%s", symbol)
+	client := &http.Client{Timeout: 3 * time.Second}
+    resp, err := client.Get(urlA)
+	if err != nil {
+        resp, err = client.Get(urlB)
+        if err != nil {
+            return 0, err
+        }
+	}
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return 0, err
+	}
+	var result struct {
+		PriceChangePercent string `json:"priceChangePercent"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return 0, err
+	}
+	v, _ := strconv.ParseFloat(result.PriceChangePercent, 64)
+	return v, nil
 }
 
 // Format 格式化输出市场数据

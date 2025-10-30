@@ -171,18 +171,17 @@ func fetchMarketDataForContext(ctx *Context) error {
 			continue
 		}
 
-		// ⚠️ 流动性过滤：持仓价值低于15M USD的币种不做（多空都不做）
-		// 持仓价值 = 持仓量 × 当前价格
-		// 但现有持仓必须保留（需要决策是否平仓）
+		// ⚠️ 流动性过滤（放宽）：仅当有OI数据时评估，阈值降至5M；
+		// 主流币（BTC、ETH、SOL、BNB、XRP、DOGE、ADA）以及已有持仓一律放行
 		isExistingPosition := positionSymbols[symbol]
-		if !isExistingPosition && data.OpenInterest != nil && data.CurrentPrice > 0 {
-			// 计算持仓价值（USD）= 持仓量 × 当前价格
+		mainstream := symbol == "BTCUSDT" || symbol == "ETHUSDT" || symbol == "SOLUSDT" || symbol == "BNBUSDT" || symbol == "XRPUSDT" || symbol == "DOGEUSDT" || symbol == "ADAUSDT"
+		if !isExistingPosition && !mainstream && data.OpenInterest != nil && data.CurrentPrice > 0 {
 			oiValue := data.OpenInterest.Latest * data.CurrentPrice
-			oiValueInMillions := oiValue / 1_000_000 // 转换为百万美元单位
-			if oiValueInMillions < 15 {
-				log.Printf("⚠️  %s 持仓价值过低(%.2fM USD < 15M)，跳过此币种 [持仓量:%.0f × 价格:%.4f]",
-					symbol, oiValueInMillions, data.OpenInterest.Latest, data.CurrentPrice)
-				continue
+			oiValueInMillions := oiValue / 1_000_000
+			if oiValueInMillions < 5 {
+				log.Printf("⚠️  %s 持仓价值偏低(%.2fM USD < 5M)，暂不优先，但仍保留其它符号用于分析",
+					symbol, oiValueInMillions)
+				// 放宽策略：不再 continue，仍然纳入上下文，交由AI权衡
 			}
 		}
 
@@ -211,10 +210,11 @@ func fetchMarketDataForContext(ctx *Context) error {
 
 // calculateMaxCandidates 根据账户状态计算需要分析的候选币种数量
 func calculateMaxCandidates(ctx *Context) int {
-	// 直接返回候选池的全部币种数量
-	// 因为候选池已经在 auto_trader.go 中筛选过了
-	// 固定分析前20个评分最高的币种（来自AI500）
-	return len(ctx.CandidateCoins)
+	// 每个周期仅分析一个代币，降低token与决策复杂度
+	if len(ctx.CandidateCoins) > 0 {
+		return 1
+	}
+	return 0
 }
 
 // buildSystemPrompt 构建 System Prompt（固定规则，可缓存）
@@ -390,15 +390,10 @@ func buildUserPrompt(ctx *Context) string {
 		sb.WriteString("**当前持仓**: 无\n\n")
 	}
 
-	// 候选币种（简化市场数据）
+	// 候选币种（简化市场数据）: 永远展示候选列表；无数据时给出占位
 	sb.WriteString(fmt.Sprintf("## 候选币种 (%d个)\n\n", len(ctx.CandidateCoins)))
-	displayedCount := 0
-	for _, coin := range ctx.CandidateCoins {
+	for i, coin := range ctx.CandidateCoins {
 		marketData, hasData := ctx.MarketDataMap[coin.Symbol]
-		if !hasData {
-			continue
-		}
-		displayedCount++
 
 		sourceTags := ""
 		if len(coin.Sources) > 1 {
@@ -407,15 +402,17 @@ func buildUserPrompt(ctx *Context) string {
 			sourceTags = " (OI_Top持仓增长)"
 		}
 
-		// 简化市场数据输出，避免prompt过长
-		sb.WriteString(fmt.Sprintf("### %d. %s%s\n", displayedCount, coin.Symbol, sourceTags))
-		sb.WriteString(fmt.Sprintf("价格: %.2f (1h: %+.2f%%, 4h: %+.2f%%) | EMA20: %.3f | MACD: %.3f | RSI7: %.3f\n",
-			marketData.CurrentPrice, marketData.PriceChange1h, marketData.PriceChange4h,
-			marketData.CurrentEMA20, marketData.CurrentMACD, marketData.CurrentRSI7))
-
-		if marketData.OpenInterest != nil {
-			sb.WriteString(fmt.Sprintf("OI: %.0f | 资金费率: %.2e\n",
-				marketData.OpenInterest.Latest, marketData.FundingRate))
+		sb.WriteString(fmt.Sprintf("### %d. %s%s\n", i+1, coin.Symbol, sourceTags))
+		if hasData {
+			sb.WriteString(fmt.Sprintf("价格: %.2f (1h: %+.2f%%, 4h: %+.2f%%) | EMA20: %.3f | MACD: %.3f | RSI7: %.3f\n",
+				marketData.CurrentPrice, marketData.PriceChange1h, marketData.PriceChange4h,
+				marketData.CurrentEMA20, marketData.CurrentMACD, marketData.CurrentRSI7))
+			if marketData.OpenInterest != nil {
+				sb.WriteString(fmt.Sprintf("OI: %.0f | 资金费率: %.2e\n",
+					marketData.OpenInterest.Latest, marketData.FundingRate))
+			}
+		} else {
+			sb.WriteString("数据加载中（该币行情/指标未返回，本周期请以其它信息为主）。\n")
 		}
 		sb.WriteString("\n")
 	}
