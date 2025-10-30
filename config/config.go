@@ -9,16 +9,17 @@ import (
 
 // TraderConfig 单个trader的配置
 type TraderConfig struct {
-	ID                  string  `json:"id"`
-	Name                string  `json:"name"`
-	AIModel             string  `json:"ai_model"` // "qwen" or "deepseek"
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	AIModel string `json:"ai_model"` // "qwen" or "deepseek"
 
 	// 交易平台选择（二选一）
-	Exchange             string  `json:"exchange"` // "binance" or "hyperliquid"
+	Exchange string `json:"exchange"` // "binance" or "hyperliquid"
 
 	// 币安配置
-	BinanceAPIKey       string  `json:"binance_api_key,omitempty"`
-	BinanceSecretKey    string  `json:"binance_secret_key,omitempty"`
+	BinanceAPIKey    string `json:"binance_api_key,omitempty"`
+	BinanceSecretKey string `json:"binance_secret_key,omitempty"`
+	BinanceTestnet   bool   `json:"binance_testnet,omitempty"` // 是否使用币安测试网
 
 	// Hyperliquid配置
 	HyperliquidPrivateKey string `json:"hyperliquid_private_key,omitempty"`
@@ -30,13 +31,13 @@ type TraderConfig struct {
 	AsterPrivateKey string `json:"aster_private_key,omitempty"` // Aster API钱包私钥
 
 	// AI配置
-	QwenKey             string  `json:"qwen_key,omitempty"`
-	DeepSeekKey         string  `json:"deepseek_key,omitempty"`
+	QwenKey     string `json:"qwen_key,omitempty"`
+	DeepSeekKey string `json:"deepseek_key,omitempty"`
 
 	// 自定义AI API配置（支持任何OpenAI格式的API）
-	CustomAPIURL        string  `json:"custom_api_url,omitempty"`
-	CustomAPIKey        string  `json:"custom_api_key,omitempty"`
-	CustomModelName     string  `json:"custom_model_name,omitempty"`
+	CustomAPIURL    string `json:"custom_api_url,omitempty"`
+	CustomAPIKey    string `json:"custom_api_key,omitempty"`
+	CustomModelName string `json:"custom_model_name,omitempty"`
 
 	InitialBalance      float64 `json:"initial_balance"`
 	ScanIntervalMinutes int     `json:"scan_interval_minutes"`
@@ -44,14 +45,14 @@ type TraderConfig struct {
 
 // LeverageConfig 杠杆配置
 type LeverageConfig struct {
-	BTCETHLeverage  int `json:"btc_eth_leverage"`  // BTC和ETH的杠杆倍数（主账户建议5-50，子账户≤5）
-	AltcoinLeverage int `json:"altcoin_leverage"`  // 山寨币的杠杆倍数（主账户建议5-20，子账户≤5）
+	BTCETHLeverage  int `json:"btc_eth_leverage"` // BTC和ETH的杠杆倍数（主账户建议5-50，子账户≤5）
+	AltcoinLeverage int `json:"altcoin_leverage"` // 山寨币的杠杆倍数（主账户建议5-20，子账户≤5）
 }
 
 // Config 总配置
 type Config struct {
 	Traders            []TraderConfig `json:"traders"`
-	UseDefaultCoins    bool           `json:"use_default_coins"`     // 是否使用默认主流币种列表
+	UseDefaultCoins    bool           `json:"use_default_coins"` // 是否使用默认主流币种列表
 	CoinPoolAPIURL     string         `json:"coin_pool_api_url"`
 	OITopAPIURL        string         `json:"oi_top_api_url"`
 	APIServerPort      int            `json:"api_server_port"`
@@ -121,6 +122,12 @@ func (c *Config) Validate() error {
 		if trader.Exchange == "binance" {
 			if trader.BinanceAPIKey == "" || trader.BinanceSecretKey == "" {
 				return fmt.Errorf("trader[%d]: 使用币安时必须配置binance_api_key和binance_secret_key", i)
+			}
+			// 测试网提示
+			if trader.BinanceTestnet {
+				fmt.Printf("ℹ️  trader[%d]: 使用币安测试网 (https://testnet.binancefuture.com) - 仅用于测试，不会产生真实交易\n", i)
+			} else {
+				fmt.Printf("⚠️  trader[%d]: 使用币安主网 (https://fapi.binance.com) - 将进行真实交易，请谨慎操作！\n", i)
 			}
 		} else if trader.Exchange == "hyperliquid" {
 			if trader.HyperliquidPrivateKey == "" {
