@@ -36,6 +36,7 @@ func (tm *TraderManager) AddTrader(cfg config.TraderConfig, coinPoolURL string, 
 		ID:                    cfg.ID,
 		Name:                  cfg.Name,
 		AIModel:               cfg.AIModel,
+		TradingEnabled:        cfg.Enabled,
 		Exchange:              cfg.Exchange,
 		BinanceAPIKey:         cfg.BinanceAPIKey,
 		BinanceSecretKey:      cfg.BinanceSecretKey,
@@ -94,6 +95,38 @@ func (tm *TraderManager) GetAllTraders() map[string]*trader.AutoTrader {
 		result[id] = t
 	}
 	return result
+}
+
+// RemoveTrader 删除trader
+func (tm *TraderManager) RemoveTrader(id string) error {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	t, exists := tm.traders[id]
+	if !exists {
+		return fmt.Errorf("trader ID '%s' 不存在", id)
+	}
+
+	// 停止trader
+	t.Stop()
+
+	// 从map中删除
+	delete(tm.traders, id)
+
+	log.Printf("✅ 已删除交易者: %s", id)
+	return nil
+}
+
+// SetTradingEnabled 设置指定trader的交易开关
+func (tm *TraderManager) SetTradingEnabled(id string, enabled bool) error {
+	tm.mu.RLock()
+	t, exists := tm.traders[id]
+	tm.mu.RUnlock()
+	if !exists {
+		return fmt.Errorf("trader ID '%s' 不存在", id)
+	}
+	t.SetTradingEnabled(enabled)
+	return nil
 }
 
 // GetTraderIDs 获取所有trader ID列表

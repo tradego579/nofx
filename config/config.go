@@ -11,7 +11,8 @@ import (
 type TraderConfig struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
-	AIModel string `json:"ai_model"` // "qwen" or "deepseek"
+	AIModel string `json:"ai_model"`          // "qwen" or "deepseek"
+	Enabled bool   `json:"enabled,omitempty"` // 是否开启交易（关闭则不请求AI）
 
 	// 交易平台选择（二选一）
 	Exchange string `json:"exchange"` // "binance" or "hyperliquid"
@@ -95,6 +96,11 @@ func (c *Config) Validate() error {
 
 	traderIDs := make(map[string]bool)
 	for i, trader := range c.Traders {
+		// 默认启用
+		if !trader.Enabled {
+			// 若未显式提供，默认为启用
+			c.Traders[i].Enabled = true
+		}
 		if trader.ID == "" {
 			return fmt.Errorf("trader[%d]: ID不能为空", i)
 		}

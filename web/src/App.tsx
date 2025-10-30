@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import useSWR from 'swr';
 import { api } from './lib/api';
 import { EquityChart } from './components/EquityChart';
+import AdminTraders from './components/AdminTraders';
 import { CompetitionPage } from './components/CompetitionPage';
 import AILearning from './components/AILearning';
 import { LanguageProvider, useLanguage } from './contexts/LanguageContext';
@@ -15,7 +16,7 @@ import type {
   TraderInfo,
 } from './types';
 
-type Page = 'competition' | 'trader';
+type Page = 'competition' | 'trader' | 'admin';
 
 function App() {
   const { language, setLanguage } = useLanguage();
@@ -189,6 +190,16 @@ function App() {
                 >
                   {t('details', language)}
                 </button>
+                <button
+                  onClick={() => setCurrentPage('admin')}
+                  className={`px-4 py-2 rounded text-sm font-semibold transition-all`}
+                  style={currentPage === 'admin'
+                    ? { background: '#F0B90B', color: '#000' }
+                    : { background: 'transparent', color: '#848E9C' }
+                  }
+                >
+                  Admin
+                </button>
               </div>
 
               {/* Trader Selector (only show on trader page) */}
@@ -232,9 +243,8 @@ function App() {
 
       {/* Main Content */}
       <main className="max-w-[1920px] mx-auto px-6 py-6">
-        {currentPage === 'competition' ? (
-          <CompetitionPage />
-        ) : (
+        {currentPage === 'competition' && <CompetitionPage />}
+        {currentPage === 'trader' && (
           <TraderDetailsPage
             selectedTrader={selectedTrader}
             status={status}
@@ -246,6 +256,7 @@ function App() {
             language={language}
           />
         )}
+        {currentPage === 'admin' && <AdminTraders />}
       </main>
 
       {/* Footer */}
@@ -348,6 +359,20 @@ function TraderDetailsPage({
               <span>Cycles: {status.call_count}</span>
               <span>•</span>
               <span>Runtime: {status.runtime_minutes} min</span>
+              <span>•</span>
+              {(() => {
+                const enabled = (status as any)?.trading_enabled === true;
+                return (
+                  <span
+                    className="px-2 py-0.5 rounded font-bold"
+                    style={enabled
+                      ? { background: 'rgba(14,203,129,0.12)', color: '#0ECB81', border: '1px solid rgba(14,203,129,0.25)' }
+                      : { background: 'rgba(132,142,156,0.15)', color: '#848E9C', border: '1px solid rgba(132,142,156,0.25)' }}
+                  >
+                    {enabled ? '交易中' : '交易未开启'}
+                  </span>
+                );
+              })()}
             </>
           )}
         </div>
@@ -394,6 +419,35 @@ function TraderDetailsPage({
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
         {/* 左侧：图表 + 持仓 */}
         <div className="space-y-6">
+          {/* Candidate Coins */}
+          <div className="binance-card p-6 animate-slide-in" style={{ animationDelay: '0.05s' }}>
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-xl font-bold flex items-center gap-2" style={{ color: '#EAECEF' }}>
+                🔎 候选币种
+              </h2>
+              {decisions && decisions.length > 0 && decisions[0]?.candidate_coins?.length > 0 && (
+                <div className="text-xs px-3 py-1 rounded" style={{ background: 'rgba(240, 185, 11, 0.1)', color: '#F0B90B', border: '1px solid rgba(240, 185, 11, 0.2)' }}>
+                  {decisions[0].candidate_coins.length} 个
+                </div>
+              )}
+            </div>
+
+            {decisions && decisions.length > 0 && decisions[0]?.candidate_coins?.length > 0 ? (
+              <div className="flex flex-wrap gap-2">
+                {decisions[0].candidate_coins.map((sym, i) => (
+                  <span key={i} className="px-3 py-1 rounded text-xs font-bold"
+                        style={{ background: '#0B0E11', color: '#EAECEF', border: '1px solid #2B3139' }}>
+                    {sym}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <div className="text-sm" style={{ color: '#848E9C' }}>
+                暂无候选币种。可在配置中启用 AI500 或 OI Top，或等待下个周期。
+              </div>
+            )}
+          </div>
+
           {/* Equity Chart */}
           <div className="animate-slide-in" style={{ animationDelay: '0.1s' }}>
             <EquityChart traderId={selectedTrader.trader_id} />
@@ -570,6 +624,11 @@ function DecisionCard({ decision, language }: { decision: DecisionRecord; langua
           <div className="text-xs" style={{ color: '#848E9C' }}>
             {new Date(decision.timestamp).toLocaleString()}
           </div>
+          {(decision as any).ai_model && (
+            <div className="text-xs mt-1" style={{ color: (decision as any).ai_model === 'qwen' ? '#c084fc' : '#60a5fa' }}>
+              AI Model: {(decision as any).ai_model.toUpperCase()}
+            </div>
+          )}
         </div>
         <div
           className="px-3 py-1 rounded text-xs font-bold"

@@ -110,4 +110,57 @@ export const api = {
     if (!res.ok) throw new Error('获取AI学习数据失败');
     return res.json();
   },
+
+  // 管理接口 - Traders CRUD
+  async adminListTraders(): Promise<any[]> {
+    const res = await fetch(`${API_BASE}/admin/traders`);
+    if (!res.ok) throw new Error('获取DB traders失败');
+    return res.json();
+  },
+
+  async adminUpsertTrader(doc: any): Promise<{ ok: boolean }> {
+    const res = await fetch(`${API_BASE}/admin/traders`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(doc),
+    });
+    if (!res.ok) throw new Error('保存Trader失败');
+    return res.json();
+  },
+
+  async adminDeleteTrader(trader_id: string): Promise<{ ok: boolean }> {
+    const res = await fetch(`${API_BASE}/admin/traders`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ trader_id }),
+    });
+    if (!res.ok) throw new Error('删除Trader失败');
+    return res.json();
+  },
+
+  async getTradingEnabled(traderId?: string): Promise<{ trader_id: string; trading_enabled: boolean }> {
+    const url = traderId ? `${API_BASE}/trading/enabled?trader_id=${traderId}` : `${API_BASE}/trading/enabled`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('获取交易开关失败');
+    return res.json();
+  },
+
+  async setTradingEnabled(traderId: string, enabled: boolean): Promise<{ trader_id: string; trading_enabled: boolean }>{
+    const res = await fetch(`${API_BASE}/trading/enabled`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ trader_id: traderId, enabled }),
+    });
+    if (!res.ok) throw new Error('设置交易开关失败');
+    return res.json();
+  },
+
+  // 重载交易者（热重载）
+  async adminReload() {
+    const res = await fetch(`${API_BASE}/admin/reload`, {
+      method: 'POST',
+    });
+    if (!res.ok) throw new Error('重载失败');
+    return res.json();
+  },
 };

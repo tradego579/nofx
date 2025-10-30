@@ -1,10 +1,14 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
+	"nofx/config"
+	"nofx/db"
 	"nofx/manager"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
@@ -77,6 +81,16 @@ func (s *Server) setupRoutes() {
 		api.GET("/statistics", s.handleStatistics)
 		api.GET("/equity-history", s.handleEquityHistory)
 		api.GET("/performance", s.handlePerformance)
+
+		// 交易开关
+		api.GET("/trading/enabled", s.handleGetTradingEnabled)
+		api.POST("/trading/enabled", s.handleSetTradingEnabled)
+
+		// 管理员：Trader CRUD
+		api.GET("/admin/traders", s.handleAdminListTraders)
+		api.POST("/admin/traders", s.handleAdminUpsertTrader)
+		api.DELETE("/admin/traders", s.handleAdminDeleteTrader)
+		api.POST("/admin/reload", s.handleAdminReload)
 	}
 }
 
@@ -260,7 +274,29 @@ func (s *Server) handleLatestDecisions(c *gin.Context) {
 		records[i], records[j] = records[j], records[i]
 	}
 
-	c.JSON(http.StatusOK, records)
+	// 为每个决策记录添加AI模型信息
+	aiModel := trader.GetAIModel()
+	enhancedRecords := make([]map[string]interface{}, len(records))
+	for i, record := range records {
+		enhancedRecord := map[string]interface{}{
+			"timestamp":       record.Timestamp,
+			"cycle_number":    record.CycleNumber,
+			"input_prompt":    record.InputPrompt,
+			"cot_trace":       record.CoTTrace,
+			"decision_json":   record.DecisionJSON,
+			"account_state":   record.AccountState,
+			"positions":       record.Positions,
+			"candidate_coins": record.CandidateCoins,
+			"decisions":       record.Decisions,
+			"execution_log":   record.ExecutionLog,
+			"success":         record.Success,
+			"error_message":   record.ErrorMessage,
+			"ai_model":        aiModel, // 添加AI模型信息
+		}
+		enhancedRecords[i] = enhancedRecord
+	}
+
+	c.JSON(http.StatusOK, enhancedRecords)
 }
 
 // handleStatistics 统计信息
@@ -398,6 +434,207 @@ func (s *Server) handlePerformance(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, performance)
+}
+
+// handleGetTradingEnabled 查询交易开关
+func (s *Server) handleGetTradingEnabled(c *gin.Context) {
+	_, traderID, err := s.getTraderFromQuery(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	t, err := s.traderManager.GetTrader(traderID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	status := t.GetStatus()
+	c.JSON(http.StatusOK, gin.H{
+		"trader_id":       traderID,
+		"trading_enabled": status["trading_enabled"],
+	})
+}
+
+type setTradingReq struct {
+	TraderID string `json:"trader_id"`
+	Enabled  bool   `json:"enabled"`
+}
+
+// handleSetTradingEnabled 设置交易开关
+func (s *Server) handleSetTradingEnabled(c *gin.Context) {
+	var req setTradingReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求参数无效"})
+		return
+	}
+	if req.TraderID == "" {
+		// 允许不传则使用默认trader
+		_, id, err := s.getTraderFromQuery(c)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		req.TraderID = id
+	}
+	if err := s.traderManager.SetTradingEnabled(req.TraderID, req.Enabled); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"trader_id": req.TraderID, "trading_enabled": req.Enabled})
+}
+
+// 管理端：列出DB中的traders
+func (s *Server) handleAdminListTraders(c *gin.Context) {
+	ctx := context.Background()
+	list, err := db.ListTraders(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, list)
+}
+
+// 管理端：新增/更新 trader
+func (s *Server) handleAdminUpsertTrader(c *gin.Context) {
+	var body db.TraderDoc
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求参数无效"})
+		return
+	}
+	if body.TraderID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "trader_id 必填"})
+		return
+	}
+	ctx := context.Background()
+	if err := db.UpsertTrader(ctx, body); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// 管理端：删除 trader
+func (s *Server) handleAdminDeleteTrader(c *gin.Context) {
+	type req struct {
+		TraderID string `json:"trader_id"`
+	}
+	var r req
+	if err := c.ShouldBindJSON(&r); err != nil || r.TraderID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "trader_id 必填"})
+		return
+	}
+	ctx := context.Background()
+	if err := db.DeleteTrader(ctx, r.TraderID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// 管理端：重载（从DB重新装载traders）
+func (s *Server) handleAdminReload(c *gin.Context) {
+	// 从MongoDB重新加载所有交易者
+	ctx := context.Background()
+	tradersFromDB, err := db.ListTraders(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("从数据库加载交易者失败: %v", err)})
+		return
+	}
+
+	// 获取当前已加载的交易者
+	currentTraders := s.traderManager.GetAllTraders()
+	currentTraderIDs := make(map[string]bool)
+	for _, trader := range currentTraders {
+		currentTraderIDs[trader.GetID()] = true
+	}
+
+	// 创建数据库中的交易者ID映射
+	dbTraderIDs := make(map[string]bool)
+	for _, traderDoc := range tradersFromDB {
+		dbTraderIDs[traderDoc.TraderID] = true
+	}
+
+	// 删除不在数据库中的交易者
+	removedCount := 0
+	for traderID := range currentTraderIDs {
+		if !dbTraderIDs[traderID] {
+			// 这个交易者在数据库中不存在，需要删除
+			err := s.traderManager.RemoveTrader(traderID)
+			if err != nil {
+				log.Printf("❌ 删除交易者 %s 失败: %v", traderID, err)
+				continue
+			}
+			removedCount++
+		}
+	}
+
+	// 添加新的交易者
+	addedCount := 0
+	for _, traderDoc := range tradersFromDB {
+		traderID := traderDoc.TraderID
+		if !currentTraderIDs[traderID] {
+			// 这是一个新的交易者，需要添加
+			cfg := db.ToConfig(traderDoc)
+
+			// 获取全局配置（从现有交易者中获取）
+			var globalConfig *config.Config
+			if len(currentTraders) > 0 {
+				// 从现有交易者获取全局配置
+				globalConfig = &config.Config{
+					UseDefaultCoins:    true,                                                         // 默认值
+					CoinPoolAPIURL:     "",                                                           // 从现有配置获取
+					OITopAPIURL:        "",                                                           // 从现有配置获取
+					MaxDailyLoss:       0.1,                                                          // 默认10%
+					MaxDrawdown:        0.2,                                                          // 默认20%
+					StopTradingMinutes: 60,                                                           // 默认60分钟
+					Leverage:           config.LeverageConfig{BTCETHLeverage: 5, AltcoinLeverage: 5}, // 默认5倍杠杆
+				}
+			}
+
+			err := s.traderManager.AddTrader(
+				cfg,
+				globalConfig.CoinPoolAPIURL,
+				globalConfig.MaxDailyLoss,
+				globalConfig.MaxDrawdown,
+				globalConfig.StopTradingMinutes,
+				globalConfig.Leverage,
+			)
+			if err != nil {
+				log.Printf("❌ 添加新交易者 %s 失败: %v", traderID, err)
+				continue
+			}
+
+			// 启动新交易者
+			trader, err := s.traderManager.GetTrader(traderID)
+			if err == nil {
+				go trader.Run()
+				log.Printf("✅ 已添加并启动新交易者: %s (%s)", traderDoc.Name, strings.ToUpper(traderDoc.AIModel))
+				addedCount++
+			}
+		}
+	}
+
+	// 同步现有交易者的启停开关（根据DB）
+	dbEnabled := make(map[string]bool)
+	for _, td := range tradersFromDB {
+		dbEnabled[td.TraderID] = td.Enabled
+	}
+	synced := 0
+	for _, t := range s.traderManager.GetAllTraders() {
+		id := t.GetID()
+		if v, ok := dbEnabled[id]; ok {
+			_ = s.traderManager.SetTradingEnabled(id, v)
+			synced++
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"ok":            true,
+		"message":       fmt.Sprintf("重载完成，新增 %d 个，删除 %d 个，同步开关 %d 个", addedCount, removedCount, synced),
+		"added_count":   addedCount,
+		"removed_count": removedCount,
+		"synced_switch": synced,
+	})
 }
 
 // Start 启动服务器

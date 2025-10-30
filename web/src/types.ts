@@ -11,6 +11,7 @@ export interface SystemStatus {
   stop_until: string;
   last_reset_time: string;
   ai_provider: string;
+  trading_enabled?: boolean;
 }
 
 export interface AccountInfo {
@@ -74,6 +75,7 @@ export interface DecisionRecord {
   execution_log: string[];
   success: boolean;
   error_message?: string;
+  ai_model?: string;
 }
 
 export interface Statistics {

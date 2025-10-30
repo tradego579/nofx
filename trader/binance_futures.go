@@ -29,6 +29,8 @@ func NewFuturesTrader(apiKey, secretKey string, isTestnet bool) *FuturesTrader {
 		log.Printf("🔗 使用币安主网: https://fapi.binance.com")
 	}
 
+	// 使用默认时间设置（若本机时钟漂移导致 -1021，请同步系统时间）
+
 	return &FuturesTrader{
 		client:    client,
 		isTestnet: isTestnet,

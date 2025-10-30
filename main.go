@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"nofx/api"
 	"nofx/config"
+	"nofx/db"
 	"nofx/manager"
 	"nofx/pool"
 	"os"
@@ -19,16 +21,43 @@ func main() {
 	fmt.Println("╚════════════════════════════════════════════════════════════╝")
 	fmt.Println()
 
-	// 加载配置文件
+	// 优先从MongoDB加载traders；若失败或为空，再加载配置文件
+	_ = dbInit()
+
+	var cfg *config.Config
+	// 默认配置文件
 	configFile := "config.json"
 	if len(os.Args) > 1 {
 		configFile = os.Args[1]
 	}
 
-	log.Printf("📋 加载配置文件: %s", configFile)
-	cfg, err := config.LoadConfig(configFile)
-	if err != nil {
-		log.Fatalf("❌ 加载配置失败: %v", err)
+	tradersFromDB, dbErr := loadTradersFromDB()
+	if dbErr == nil && len(tradersFromDB) > 0 {
+		cfg = &config.Config{Traders: tradersFromDB}
+		// 其余全局项仍从文件读取（若存在）
+		if fileCfg, err := config.LoadConfig(configFile); err == nil {
+			cfg.UseDefaultCoins = fileCfg.UseDefaultCoins
+			cfg.CoinPoolAPIURL = fileCfg.CoinPoolAPIURL
+			cfg.OITopAPIURL = fileCfg.OITopAPIURL
+			cfg.APIServerPort = fileCfg.APIServerPort
+			cfg.MaxDailyLoss = fileCfg.MaxDailyLoss
+			cfg.MaxDrawdown = fileCfg.MaxDrawdown
+			cfg.StopTradingMinutes = fileCfg.StopTradingMinutes
+			cfg.Leverage = fileCfg.Leverage
+		} else {
+			// 设置默认端口
+			if cfg.APIServerPort == 0 {
+				cfg.APIServerPort = 8080
+			}
+		}
+		log.Printf("📋 从MongoDB加载traders: %d 个", len(cfg.Traders))
+	} else {
+		log.Printf("📋 加载配置文件: %s", configFile)
+		var err error
+		cfg, err = config.LoadConfig(configFile)
+		if err != nil {
+			log.Fatalf("❌ 加载配置失败: %v", err)
+		}
 	}
 
 	log.Printf("✓ 配置加载成功，共%d个trader参赛", len(cfg.Traders))
@@ -116,4 +145,31 @@ func main() {
 
 	fmt.Println()
 	fmt.Println("👋 感谢使用AI交易竞赛系统！")
+}
+
+func dbInit() error {
+	ctx := context.Background()
+	_, err := db.Connect(ctx)
+	if err != nil {
+		log.Printf("⚠️  MongoDB 未连接: %v (将回退到文件配置)", err)
+	} else {
+		log.Printf("✓ MongoDB 已准备就绪")
+	}
+	return err
+}
+
+func loadTradersFromDB() ([]config.TraderConfig, error) {
+	ctx := context.Background()
+	list, err := db.ListTraders(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(list) == 0 {
+		return nil, nil
+	}
+	res := make([]config.TraderConfig, 0, len(list))
+	for _, d := range list {
+		res = append(res, db.ToConfig(d))
+	}
+	return res, nil
 }

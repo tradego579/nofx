@@ -63,6 +63,9 @@ type AutoTraderConfig struct {
 	MaxDailyLoss    float64       // 最大日亏损百分比（提示）
 	MaxDrawdown     float64       // 最大回撤百分比（提示）
 	StopTradingTime time.Duration // 触发风控后暂停时长
+
+	// 交易开关
+	TradingEnabled bool // 关闭时不请求AI
 }
 
 // AutoTrader 自动交易器
@@ -82,6 +85,7 @@ type AutoTrader struct {
 	startTime             time.Time        // 系统启动时间
 	callCount             int              // AI调用次数
 	positionFirstSeenTime map[string]int64 // 持仓首次出现时间 (symbol_side -> timestamp毫秒)
+	tradingEnabled        bool
 }
 
 // NewAutoTrader 创建自动交易器
@@ -173,6 +177,7 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 		callCount:             0,
 		isRunning:             false,
 		positionFirstSeenTime: make(map[string]int64),
+		tradingEnabled:        config.TradingEnabled,
 	}, nil
 }
 
@@ -281,9 +286,35 @@ func (at *AutoTrader) runCycle() error {
 	log.Printf("📊 账户净值: %.2f USDT | 可用: %.2f USDT | 持仓: %d",
 		ctx.Account.TotalEquity, ctx.Account.AvailableBalance, ctx.Account.PositionCount)
 
-	// 4. 调用AI获取完整决策
+	// 4. 若交易未开启，则不请求AI，仅记录一次心跳
+	if !at.tradingEnabled {
+		log.Println("⏸ 交易未开启：跳过AI请求与交易执行，仅记录状态")
+		record.Success = true
+		at.decisionLogger.LogDecision(record)
+		return nil
+	}
+	// 调用AI获取完整决策
+	// 为本次调用构造独立AI配置（线程安全，不互相覆盖）
+	aiCfg := mcp.Config{Timeout: 120 * time.Second}
+	if at.aiModel == "custom" {
+		aiCfg.Provider = mcp.ProviderCustom
+		aiCfg.APIKey = at.config.CustomAPIKey
+		aiCfg.BaseURL = at.config.CustomAPIURL
+		aiCfg.Model = at.config.CustomModelName
+	} else if at.aiModel == "qwen" || at.config.UseQwen {
+		aiCfg.Provider = mcp.ProviderQwen
+		aiCfg.APIKey = at.config.QwenKey
+		aiCfg.BaseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+		aiCfg.Model = "qwen-plus"
+	} else {
+		aiCfg.Provider = mcp.ProviderDeepSeek
+		aiCfg.APIKey = at.config.DeepSeekKey
+		aiCfg.BaseURL = "https://api.deepseek.com/v1"
+		aiCfg.Model = "deepseek-chat"
+	}
+
 	log.Println("🤖 正在请求AI分析并决策...")
-	decision, err := decision.GetFullDecision(ctx)
+	decision, err := decision.GetFullDecision(ctx, aiCfg)
 
 	// 即使有错误，也保存思维链、决策和输入prompt（用于debug）
 	if decision != nil {
@@ -756,6 +787,17 @@ func (at *AutoTrader) GetStatus() map[string]interface{} {
 		"stop_until":      at.stopUntil.Format(time.RFC3339),
 		"last_reset_time": at.lastResetTime.Format(time.RFC3339),
 		"ai_provider":     aiProvider,
+		"trading_enabled": at.tradingEnabled,
+	}
+}
+
+// SetTradingEnabled 设置交易开关
+func (at *AutoTrader) SetTradingEnabled(enabled bool) {
+	at.tradingEnabled = enabled
+	if enabled {
+		log.Printf("▶️ [%s] 已开启交易", at.name)
+	} else {
+		log.Printf("⏸ [%s] 已关闭交易（不再请求AI）", at.name)
 	}
 }
 

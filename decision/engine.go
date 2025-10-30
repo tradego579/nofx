@@ -7,6 +7,7 @@ import (
 	"nofx/market"
 	"nofx/mcp"
 	"nofx/pool"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -90,7 +91,7 @@ type FullDecision struct {
 }
 
 // GetFullDecision 获取AI的完整交易决策（批量分析所有币种和持仓）
-func GetFullDecision(ctx *Context) (*FullDecision, error) {
+func GetFullDecision(ctx *Context, aiCfg mcp.Config) (*FullDecision, error) {
 	// 1. 为所有币种获取市场数据
 	if err := fetchMarketDataForContext(ctx); err != nil {
 		return nil, fmt.Errorf("获取市场数据失败: %w", err)
@@ -100,8 +101,25 @@ func GetFullDecision(ctx *Context) (*FullDecision, error) {
 	systemPrompt := buildSystemPrompt(ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
 	userPrompt := buildUserPrompt(ctx)
 
+	// Qwen降本策略：精简system prompt并截断user prompt，避免因字数过多导致计费失败
+	if aiCfg.Provider == mcp.ProviderQwen {
+		var sb strings.Builder
+		sb.WriteString("你是加密合约交易AI，仅输出严格JSON。\n")
+		sb.WriteString("目标：高夏普，低回撤；强信号才交易。\n")
+		sb.WriteString("约束：最多3仓；总保证金≤90%；RR≥1:3；做多/做空均衡；可等待。\n")
+		sb.WriteString("BTC/ETH杠杆=")
+		sb.WriteString(fmt.Sprintf("%dx; 山寨杠杆=%dx。\n", ctx.BTCETHLeverage, ctx.AltcoinLeverage))
+		sb.WriteString("严格JSON字段：symbol, action, leverage, position_size_usd, stop_loss, take_profit, confidence, reasoning。\n")
+		systemPrompt = sb.String()
+
+		const maxUserLen = 4000
+		if len(userPrompt) > maxUserLen {
+			userPrompt = userPrompt[:maxUserLen]
+		}
+	}
+
 	// 3. 调用AI API（使用 system + user prompt）
-	aiResponse, err := mcp.CallWithMessages(systemPrompt, userPrompt)
+	aiResponse, err := mcp.CallWithMessagesWithConfig(aiCfg, systemPrompt, userPrompt)
 	if err != nil {
 		return nil, fmt.Errorf("调用AI API失败: %w", err)
 	}
@@ -372,8 +390,8 @@ func buildUserPrompt(ctx *Context) string {
 		sb.WriteString("**当前持仓**: 无\n\n")
 	}
 
-	// 候选币种（完整市场数据）
-	sb.WriteString(fmt.Sprintf("## 候选币种 (%d个)\n\n", len(ctx.MarketDataMap)))
+	// 候选币种（简化市场数据）
+	sb.WriteString(fmt.Sprintf("## 候选币种 (%d个)\n\n", len(ctx.CandidateCoins)))
 	displayedCount := 0
 	for _, coin := range ctx.CandidateCoins {
 		marketData, hasData := ctx.MarketDataMap[coin.Symbol]
@@ -389,9 +407,16 @@ func buildUserPrompt(ctx *Context) string {
 			sourceTags = " (OI_Top持仓增长)"
 		}
 
-		// 使用FormatMarketData输出完整市场数据
-		sb.WriteString(fmt.Sprintf("### %d. %s%s\n\n", displayedCount, coin.Symbol, sourceTags))
-		sb.WriteString(market.Format(marketData))
+		// 简化市场数据输出，避免prompt过长
+		sb.WriteString(fmt.Sprintf("### %d. %s%s\n", displayedCount, coin.Symbol, sourceTags))
+		sb.WriteString(fmt.Sprintf("价格: %.2f (1h: %+.2f%%, 4h: %+.2f%%) | EMA20: %.3f | MACD: %.3f | RSI7: %.3f\n",
+			marketData.CurrentPrice, marketData.PriceChange1h, marketData.PriceChange4h,
+			marketData.CurrentEMA20, marketData.CurrentMACD, marketData.CurrentRSI7))
+
+		if marketData.OpenInterest != nil {
+			sb.WriteString(fmt.Sprintf("OI: %.0f | 资金费率: %.2e\n",
+				marketData.OpenInterest.Latest, marketData.FundingRate))
+		}
 		sb.WriteString("\n")
 	}
 	sb.WriteString("\n")
@@ -463,7 +488,106 @@ func extractDecisions(response string) ([]Decision, error) {
 	// 直接查找JSON数组 - 找第一个完整的JSON数组
 	arrayStart := strings.Index(response, "[")
 	if arrayStart == -1 {
-		return nil, fmt.Errorf("无法找到JSON数组起始")
+		// 兼容：有的模型会输出单个对象而不是数组，尝试解析为单对象
+		objStart := strings.Index(response, "{")
+		if objStart == -1 {
+			return nil, fmt.Errorf("无法找到JSON数组起始")
+		}
+		// 从 { 开始匹配到对应的 }
+		objEnd := objStart
+		depth := 0
+		for i := objStart; i < len(response); i++ {
+			switch response[i] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+				if depth == 0 {
+					objEnd = i
+					i = len(response)
+				}
+			}
+		}
+		if depth != 0 || objEnd <= objStart {
+			return nil, fmt.Errorf("无法找到JSON对象结束")
+		}
+		jsonObj := strings.TrimSpace(response[objStart : objEnd+1])
+		jsonObj = fixMissingQuotes(jsonObj)
+		// 使用宽松解析到通用map，再归一化为Decision
+		var raw map[string]interface{}
+		if err := json.Unmarshal([]byte(jsonObj), &raw); err != nil {
+			return nil, fmt.Errorf("JSON对象解析失败: %w\nJSON内容: %s", err, jsonObj)
+		}
+
+		normalizeStr := func(v interface{}) string {
+			if v == nil {
+				return ""
+			}
+			switch t := v.(type) {
+			case string:
+				return t
+			case float64:
+				return fmt.Sprintf("%g", t)
+			case bool:
+				if t {
+					return "true"
+				}
+				return "false"
+			default:
+				b, _ := json.Marshal(t)
+				return string(b)
+			}
+		}
+		normalizeInt := func(v interface{}) int {
+			if v == nil {
+				return 0
+			}
+			switch t := v.(type) {
+			case float64:
+				return int(t)
+			case string:
+				if n, err := strconv.Atoi(strings.TrimSpace(t)); err == nil {
+					return n
+				}
+				return 0
+			default:
+				return 0
+			}
+		}
+		normalizeF := func(v interface{}) float64 {
+			if v == nil {
+				return 0
+			}
+			switch t := v.(type) {
+			case float64:
+				return t
+			case string:
+				if f, err := strconv.ParseFloat(strings.TrimSpace(t), 64); err == nil {
+					return f
+				}
+				return 0
+			default:
+				return 0
+			}
+		}
+
+		one := Decision{
+			Symbol:          strings.TrimSpace(normalizeStr(raw["symbol"])),
+			Action:          strings.ToLower(strings.TrimSpace(normalizeStr(raw["action"]))),
+			Leverage:        normalizeInt(raw["leverage"]),
+			PositionSizeUSD: normalizeF(raw["position_size_usd"]),
+			StopLoss:        normalizeF(raw["stop_loss"]),
+			TakeProfit:      normalizeF(raw["take_profit"]),
+			Confidence:      int(normalizeF(raw["confidence"])),
+			Reasoning:       strings.TrimSpace(normalizeStr(raw["reasoning"])),
+		}
+		if one.Symbol == "" {
+			one.Symbol = "ALL"
+		}
+		if one.Action == "" {
+			one.Action = "wait"
+		}
+		return []Decision{one}, nil
 	}
 
 	// 从 [ 开始，匹配括号找到对应的 ]
@@ -484,6 +608,11 @@ func extractDecisions(response string) ([]Decision, error) {
 	var decisions []Decision
 	if err := json.Unmarshal([]byte(jsonContent), &decisions); err != nil {
 		return nil, fmt.Errorf("JSON解析失败: %w\nJSON内容: %s", err, jsonContent)
+	}
+
+	// 统一规范：action 一律转小写，兼容模型返回的 "HOLD"/"Wait" 等
+	for i := range decisions {
+		decisions[i].Action = strings.ToLower(strings.TrimSpace(decisions[i].Action))
 	}
 
 	return decisions, nil
